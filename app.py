@@ -30,7 +30,7 @@ except Exception:
 
 
 st.set_page_config(
-    page_title="Gyártási Diagnosztika DEMO V2.7.5.4.4.3.3.2.2",
+    page_title="Gyártási Diagnosztika DEMO V3.7.5.4.4.3.3.2.2",
     page_icon="🏭",
     layout="wide"
 )
@@ -409,7 +409,7 @@ def build_action_plan(df: pd.DataFrame, pair: pd.DataFrame, impact_df: pd.DataFr
     if out.empty: return out
     order={"Magas":0,"Közepes":1,"Alacsony":2}
     out["_sort"]=out["Prioritás"].map(order).fillna(9)
-    return out.sort_values(["_sort","Becsült_hatás"],ascending=[True,False]).drop(columns=["_sort"]).head(8)
+    return out.sort_values(["_sort","Becsült_hatás"],ascending=[True,False]).drop(columns=["_sort"]).head(3)
 
 
 
@@ -432,6 +432,21 @@ def render_demo_locked_feature(title: str, teaser: str):
         unsafe_allow_html=True
     )
 
+
+
+def render_demo_paywall(title: str, bullets):
+    st.markdown(
+        f"""
+        <div style="border:1px solid #bfdbfe;background:linear-gradient(135deg,#eff6ff,#f8fafc);border-radius:18px;padding:18px;margin:12px 0;">
+            <div style="font-size:1.15rem;font-weight:950;color:#1e3a8a;">🔒 {title}</div>
+            <div style="margin-top:8px;color:#334155;">
+                {'<br>'.join(['• ' + str(b) for b in bullets])}
+            </div>
+            <div style="margin-top:10px;font-weight:900;color:#0f172a;">Ez a PRO verzióban nyílik meg mentett céges adatokkal.</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 def normalized_pair_score_table(pair_df: pd.DataFrame) -> pd.DataFrame:
     """Dolgozó-gép mátrix 0-100 normalizált pontszámmal.
@@ -758,7 +773,7 @@ def make_pdf_fulfillment_cards(summary_df: pd.DataFrame, width=500):
         return Paragraph("Nincs rendelésteljesítési adat.", ParagraphStyle("Empty", fontSize=8))
 
     rows = []
-    for _, r in summary_df.head(8).iterrows():
+    for _, r in summary_df.head(3).iterrows():
         pct = float(r.get("Teljesítés_%", 0) or 0)
         if pct >= 95:
             color, bg = "#16a34a", "#dcfce7"
@@ -786,7 +801,7 @@ def make_pdf_fulfillment_cards(summary_df: pd.DataFrame, width=500):
         ("TOPPADDING", (0,0), (-1,-1), 6),
         ("BOTTOMPADDING", (0,0), (-1,-1), 6),
     ]
-    for i, (_, r) in enumerate(summary_df.head(8).iterrows()):
+    for i, (_, r) in enumerate(summary_df.head(3).iterrows()):
         pct = float(r.get("Teljesítés_%", 0) or 0)
         bg = "#dcfce7" if pct >= 95 else "#fef3c7" if pct >= 75 else "#fee2e2"
         style.append(("BACKGROUND", (0,i), (-1,i), colors.HexColor(bg)))
@@ -929,7 +944,7 @@ def make_pdf_capacity_chart(capacity_df, width=500, height=165):
         d.add(String(0, height / 2, "Nincs kapacitásadat.", fontSize=8, fillColor=colors.HexColor("#64748b")))
         return d
 
-    data = capacity_df[["Gép", "Kihasználtság_%"]].copy().head(8)
+    data = capacity_df[["Gép", "Kihasználtság_%"]].copy().head(3)
     chart_top = height - 30
     row_h = min(18, (height - 42) / max(len(data), 1))
     label_w = 90
@@ -1010,7 +1025,7 @@ def compact_insight_table(recs, max_items=8):
 def make_pdf_impact_table(impact_df, width=500):
     if impact_df is None or impact_df.empty:
         return Paragraph("Nincs javítási potenciál adat.", ParagraphStyle("Empty", fontSize=8))
-    show = impact_df.head(5).copy()
+    show = impact_df.head(3).copy()
     show["Becsült_havi_hatás_Ft"] = show["Becsült_havi_hatás_Ft"].apply(fmt_huf)
     data = [["Terület", "Elem", "Probléma", "Becsült hatás", "Javaslat"]]
     for _, r in show.iterrows():
@@ -1041,7 +1056,7 @@ def make_pdf_impact_table(impact_df, width=500):
 def make_pdf_top_pairs_table(pair, width=500):
     if pair is None or pair.empty:
         return Paragraph("Nincs dolgozó-gép páros adat.", ParagraphStyle("Empty", fontSize=8))
-    top = pair.sort_values("Kompatibilitási_pont", ascending=False).head(5).copy()
+    top = pair.sort_values("Kompatibilitási_pont", ascending=False).head(3).copy()
     data = [["Páros", "Pont", "Teljesítmény", "Selejt"]]
     for _, r in top.iterrows():
         data.append([
@@ -1111,7 +1126,7 @@ def build_pdf_report(
     fedezet_m = fedezet / 1_000_000
 
     story = []
-    story.append(Paragraph("Gyártási Diagnosztika DEMO V2.7 - vezetői riport", title_style))
+    story.append(Paragraph("Gyártási Diagnosztika DEMO V3.7 - vezetői riport", title_style))
     story.append(P("Rövid döntéstámogató riport: fő megállapítások, javítási potenciál, dolgozó-gép párosítások."))
     story.append(Spacer(1, 0.20 * cm))
 
@@ -1909,7 +1924,7 @@ def estimate_improvement_value(df: pd.DataFrame) -> pd.DataFrame:
     if not pair.empty:
         pair["Selejt_%"] = np.where(pair["Gyártott_db"] > 0, pair["Selejt_db"] / pair["Gyártott_db"] * 100, 0)
         avg_scrap_rate = pair["Selejt_db"].sum() / max(pair["Gyártott_db"].sum(), 1)
-        bad_pairs = pair[pair["Selejt_%"] > avg_scrap_rate * 100 * 1.15].sort_values("Selejt_%", ascending=False).head(8)
+        bad_pairs = pair[pair["Selejt_%"] > avg_scrap_rate * 100 * 1.15].sort_values("Selejt_%", ascending=False).head(3)
 
         for _, r in bad_pairs.iterrows():
             margin = max(float(r["Fedezet_db"]), avg_margin, 1)
@@ -2136,7 +2151,7 @@ def render_mapper_ui(sheets: Dict[str, pd.DataFrame]):
 # ------------------------------------------------------------
 # Header
 # ------------------------------------------------------------
-st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika DEMO V2</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika DEMO V3</div>', unsafe_allow_html=True)
 st.markdown('<div class="subtitle">Ingyenes, egyszeri Excel-alapú gyártási diagnózis. Nem ment adatot, nem készít többhetes trendet.</div>', unsafe_allow_html=True)
 
 
@@ -2295,6 +2310,20 @@ with tabs[0]:
     with k5:
         show_kpi("Becsült fedezet", fmt_huf(fedezet), "Árbevétel - anyag - gépköltség")
 
+
+    st.markdown("### DEMO korlátozás")
+    st.info("A DEMO csak gyors, egyszeri diagnózis: nincs mentés, nincs trend, nincs teljes akcióterv. A cél az érdeklődés felkeltése.")
+    render_demo_paywall(
+        "Mit látna a PRO-ban?",
+        [
+            "Több hét összehasonlítása: javul vagy romlik a gép, műszak, dolgozó?",
+            "Teljes top lista és részletes akcióterv, nem csak rövidített top 3.",
+            "Mentett céges riportok és automatikus előző időszakhoz viszonyítás.",
+            "Romló gépek, javuló dolgozók, növekvő selejt vagy állásidő automatikus felismerése.",
+            "What-if és kapacitás döntéstámogatás."
+        ]
+    )
+
     st.markdown("### Automatikus vezetői megállapítások")
     render_recommendations(recs + root_cause_recs + (default_plan_recs if 'default_plan_recs' in globals() else []))
 
@@ -2302,7 +2331,7 @@ with tabs[0]:
     if impact_df.empty:
         st.info("Nincs elég adat költséghatás-becsléshez.")
     else:
-        st.dataframe(impact_df.head(8), use_container_width=True, hide_index=True)
+        st.dataframe(impact_df.head(3), use_container_width=True, hide_index=True)
 
     st.markdown("### Digital Advisor összefoglaló")
     c1, c2, c3, c4 = st.columns(4)
@@ -2319,7 +2348,7 @@ with tabs[0]:
     if action_plan_df.empty:
         st.info("Nincs elég adat akciólista készítéséhez.")
     else:
-        st.dataframe(action_plan_df.head(5), use_container_width=True, hide_index=True)
+        st.dataframe(action_plan_df.head(3), use_container_width=True, hide_index=True)
 
     st.markdown("### Termék → gép → dolgozó ok-okozati lánc")
     if causal_chain_df.empty:
@@ -2515,6 +2544,7 @@ with tabs[5]:
 # 7. Gyártási terv + beosztás
 # ------------------------------------------------------------
 with tabs[6]:
+    render_demo_paywall("Gyártási terv + beosztás csak PRO-ban", ["Rendelésállományból terv", "Dolgozó-gép ajánlott beosztás", "Kapacitáshiány kezelése"])
     st.subheader("Gyártási terv szimulátor + dolgozói beosztás")
     st.caption("DEMO.4.3.2: a tervezett db rendelésállományból, tervezési horizontból, gépórából és múltbeli termék-gép teljesítményből számolódik.")
 
@@ -2656,6 +2686,7 @@ with tabs[6]:
 # 8. Digital Advisor / What-if
 # ------------------------------------------------------------
 with tabs[7]:
+    render_demo_paywall("Digital Advisor csak PRO-ban", ["What-if szimulátor", "Részletes akciólista", "Mentett céges benchmarkok"])
     st.subheader("Digital Production Advisor")
     st.caption("DEMO.4.3.2: vezetői egészségpont, akciólista, dolgozó-gép hőtérkép és mi történik ha szimuláció.")
 
