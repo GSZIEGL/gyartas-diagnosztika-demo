@@ -30,7 +30,7 @@ except Exception:
 
 
 st.set_page_config(
-    page_title="Gyártási Diagnosztika DEMO.7.5.4.4.3.3.2.2",
+    page_title="Gyártási Diagnosztika DEMO V2.7.5.4.4.3.3.2.2",
     page_icon="🏭",
     layout="wide"
 )
@@ -410,6 +410,82 @@ def build_action_plan(df: pd.DataFrame, pair: pd.DataFrame, impact_df: pd.DataFr
     order={"Magas":0,"Közepes":1,"Alacsony":2}
     out["_sort"]=out["Prioritás"].map(order).fillna(9)
     return out.sort_values(["_sort","Becsült_hatás"],ascending=[True,False]).drop(columns=["_sort"]).head(8)
+
+
+
+
+def render_demo_locked_feature(title: str, teaser: str):
+    st.markdown(
+        f"""
+        <div style="
+            border:1px dashed #94a3b8;
+            background:#f8fafc;
+            border-radius:16px;
+            padding:16px;
+            margin:10px 0;
+        ">
+            <div style="font-weight:900;color:#0f172a;font-size:1.05rem;">🔒 {title}</div>
+            <div style="color:#475569;margin-top:6px;">{teaser}</div>
+            <div style="color:#1e3a8a;font-weight:800;margin-top:8px;">Ez a PRO verzióban többhetes mentéssel és trenddel nyílik meg.</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def normalized_pair_score_table(pair_df: pd.DataFrame) -> pd.DataFrame:
+    """Dolgozó-gép mátrix 0-100 normalizált pontszámmal.
+
+    A korábbi abszolút pontozás miatt sok cella sárga/narancs lett.
+    Itt a legjobb párosok zöldek lesznek, mert a tényleges mezőnyön belüli relatív helyzetet is nézzük.
+    """
+    if pair_df is None or pair_df.empty or "Dolgozó" not in pair_df.columns or "Gép" not in pair_df.columns:
+        return pd.DataFrame()
+
+    work = pair_df.copy()
+    score_col = "Kompatibilitási_pont" if "Kompatibilitási_pont" in work.columns else None
+    if score_col is None:
+        return pd.DataFrame()
+
+    work[score_col] = pd.to_numeric(work[score_col], errors="coerce").fillna(0)
+    lo = float(work[score_col].min())
+    hi = float(work[score_col].max())
+    if hi > lo:
+        work["Relatív_pont"] = 45 + (work[score_col] - lo) / (hi - lo) * 55
+    else:
+        work["Relatív_pont"] = work[score_col]
+
+    # Ha az abszolút pont eleve magas, ne húzzuk le túlzottan.
+    work["Vizuális_pont"] = np.maximum(work[score_col], work["Relatív_pont"]).clip(0, 100).round(0)
+
+    return work.pivot_table(
+        index="Dolgozó",
+        columns="Gép",
+        values="Vizuális_pont",
+        aggfunc="mean"
+    ).round(0)
+
+
+def heatmap_symbol_from_score(value):
+    try:
+        x = float(value)
+    except Exception:
+        return "⚪"
+    if x >= 80:
+        return "🟢"
+    if x >= 65:
+        return "🟡"
+    if x >= 50:
+        return "🟠"
+    if x > 0:
+        return "🔴"
+    return "⚪"
+
+
+def make_symbol_heatmap_from_matrix(score_matrix: pd.DataFrame) -> pd.DataFrame:
+    if score_matrix is None or score_matrix.empty:
+        return pd.DataFrame()
+    return score_matrix.apply(lambda col: col.map(heatmap_symbol_from_score))
 
 
 def build_heatmap_symbols(matrix: pd.DataFrame) -> pd.DataFrame:
@@ -934,7 +1010,7 @@ def compact_insight_table(recs, max_items=8):
 def make_pdf_impact_table(impact_df, width=500):
     if impact_df is None or impact_df.empty:
         return Paragraph("Nincs javítási potenciál adat.", ParagraphStyle("Empty", fontSize=8))
-    show = impact_df.head(8).copy()
+    show = impact_df.head(5).copy()
     show["Becsült_havi_hatás_Ft"] = show["Becsült_havi_hatás_Ft"].apply(fmt_huf)
     data = [["Terület", "Elem", "Probléma", "Becsült hatás", "Javaslat"]]
     for _, r in show.iterrows():
@@ -965,7 +1041,7 @@ def make_pdf_impact_table(impact_df, width=500):
 def make_pdf_top_pairs_table(pair, width=500):
     if pair is None or pair.empty:
         return Paragraph("Nincs dolgozó-gép páros adat.", ParagraphStyle("Empty", fontSize=8))
-    top = pair.sort_values("Kompatibilitási_pont", ascending=False).head(8).copy()
+    top = pair.sort_values("Kompatibilitási_pont", ascending=False).head(5).copy()
     data = [["Páros", "Pont", "Teljesítmény", "Selejt"]]
     for _, r in top.iterrows():
         data.append([
@@ -1035,7 +1111,7 @@ def build_pdf_report(
     fedezet_m = fedezet / 1_000_000
 
     story = []
-    story.append(Paragraph("Gyártási Diagnosztika DEMO.7 - vezetői riport", title_style))
+    story.append(Paragraph("Gyártási Diagnosztika DEMO V2.7 - vezetői riport", title_style))
     story.append(P("Rövid döntéstámogató riport: fő megállapítások, javítási potenciál, dolgozó-gép párosítások."))
     story.append(Spacer(1, 0.20 * cm))
 
@@ -1069,7 +1145,7 @@ def build_pdf_report(
 
     story.extend(pdf_section_header("Becsült javítási potenciál", "Top javítási lehetőségek havi becsült értékkel."))
     if impact_df is not None and not impact_df.empty:
-        story.append(make_pdf_bar_chart("Top potenciál", impact_df.head(5), "Elem", "Becsült_havi_hatás_Ft", " Ft", width=520, height=135, top_n=5))
+        story.append(make_pdf_bar_chart("Top potenciál", impact_df.head(3), "Elem", "Becsült_havi_hatás_Ft", " Ft", width=520, height=135, top_n=3))
         story.append(Spacer(1, 0.10 * cm))
     story.append(make_pdf_impact_table(impact_df, width=520))
     story.append(Spacer(1, 0.22 * cm))
@@ -1077,7 +1153,7 @@ def build_pdf_report(
     story.extend(pdf_section_header("Dolgozó-gép hőtérkép", "Pontszám: zöld = kiemelkedő, sárga = jó, narancs = fejleszthető, piros = kerülendő."))
     if pair is not None and not pair.empty:
         try:
-            heat_matrix = pair.pivot_table(index="Dolgozó", columns="Gép", values="Kompatibilitási_pont", aggfunc="mean").round(0)
+            heat_matrix = normalized_pair_score_table(pair)
             story.append(make_pdf_real_heatmap(heat_matrix, width=520))
         except Exception:
             story.append(P("A hőtérkép nem készült el."))
@@ -2060,7 +2136,7 @@ def render_mapper_ui(sheets: Dict[str, pd.DataFrame]):
 # ------------------------------------------------------------
 # Header
 # ------------------------------------------------------------
-st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika DEMO</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika DEMO V2</div>', unsafe_allow_html=True)
 st.markdown('<div class="subtitle">Ingyenes, egyszeri Excel-alapú gyártási diagnózis. Nem ment adatot, nem készít többhetes trendet.</div>', unsafe_allow_html=True)
 
 
@@ -2174,7 +2250,8 @@ root_cause_recs = generate_root_cause_insights(filtered, pair, impact_df)
 # DEMO.4.3.2: Digital Production Advisor mutatók
 advisor_scores = calculate_advisor_scores(default_plan_df if 'default_plan_df' in globals() and not default_plan_df.empty else filtered, default_fulfillment_df, default_capacity_df, impact_df)
 action_plan_df = build_action_plan(filtered, pair, impact_df, default_capacity_df, default_fulfillment_df)
-symbol_matrix = build_heatmap_symbols(matrix)
+pair_score_matrix = normalized_pair_score_table(pair)
+symbol_matrix = make_symbol_heatmap_from_matrix(pair_score_matrix)
 
 
 # DEMO: ok-okozati lánc és rendelés/hiány pénzügyi összekötés
@@ -2600,12 +2677,13 @@ with tabs[7]:
 
     st.markdown("### Dolgozó–gép hőtérkép")
     st.caption("Pontszám: 85+ kiemelkedő, 70–85 jó, 55–70 fejleszthető, 55 alatt kerülendő.")
-    if matrix.empty:
+    if pair_score_matrix.empty:
         st.info("Nincs mátrixadat.")
     else:
-        # Streamlit Cloud / pandas Styler background_gradient matplotlibot kérne.
-        # Ezért itt stabil, függőségmentes szöveges hőtérképet mutatunk.
+        st.caption("🟢 80+ kiemelkedő · 🟡 65–79 jó · 🟠 50–64 fejleszthető · 🔴 50 alatt kerülendő")
         st.dataframe(symbol_matrix, use_container_width=True)
+        with st.expander("Pontszámok megnyitása"):
+            st.dataframe(pair_score_matrix, use_container_width=True)
 
     st.markdown("### Mi történik ha? szimulátor")
     s1, s2, s3 = st.columns(3)
