@@ -10,6 +10,15 @@ def safe_completion_pct(planned, demand):
 
 
 import io
+import os
+import json
+from datetime import datetime, date as dt_date
+from pathlib import Path
+
+try:
+    from supabase import create_client
+except Exception:
+    create_client = None
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -30,7 +39,7 @@ except Exception:
 
 
 st.set_page_config(
-    page_title="Gyártási Diagnosztika DEMO V3.7.5.4.4.3.3.2.2",
+    page_title="Gyártási Diagnosztika PRO SaaS V4 V4.1 V2 SaaS.7.5.4.4.3.3.2.2",
     page_icon="🏭",
     layout="wide"
 )
@@ -229,7 +238,7 @@ def prepare_data(prod: pd.DataFrame, machines: pd.DataFrame, products: pd.DataFr
     df["Árbevétel"] = df["Jó_db"] * df["Eladási_ár"]
     df["Anyagköltség_össz"] = df["Gyártott_db"] * df["Anyagköltség"]
 
-    # DEMO: gépköltség korrekció.
+    # PRO: gépköltség korrekció.
     # Korábban minden sorra teljes óradíj ment, ami irreálisan negatív fedezetot okozhatott.
     df["Becsült_gépóra"] = np.where(
         df["Kapacitás_db_óra"] > 0,
@@ -354,7 +363,7 @@ def recommended_assignment(pair: pd.DataFrame) -> pd.DataFrame:
 
 
 def calculate_advisor_scores(df: pd.DataFrame, fulfillment_df: pd.DataFrame, capacity_df: pd.DataFrame, impact_df: pd.DataFrame) -> Dict[str, float]:
-    """DEMO.4.3.2 vezetői score-ok 0-100 skálán."""
+    """PRO.4.3.2 vezetői score-ok 0-100 skálán."""
     if df is None or df.empty:
         return {"Egészségpont": 0, "Kapacitáskockázat": 0, "Határidőkockázat": 0, "Fedezetveszteség_Ft": 0, "OEE": 0, "Selejt_%": 0}
     avg_oee = float(df["OEE_light_%"].mean()) if "OEE_light_%" in df.columns else 0
@@ -409,44 +418,88 @@ def build_action_plan(df: pd.DataFrame, pair: pd.DataFrame, impact_df: pd.DataFr
     if out.empty: return out
     order={"Magas":0,"Közepes":1,"Alacsony":2}
     out["_sort"]=out["Prioritás"].map(order).fillna(9)
-    return out.sort_values(["_sort","Becsült_hatás"],ascending=[True,False]).drop(columns=["_sort"]).head(3)
+    return out.sort_values(["_sort","Becsült_hatás"],ascending=[True,False]).drop(columns=["_sort"]).head(8)
 
 
 
 
-def render_demo_locked_feature(title: str, teaser: str):
-    st.markdown(
-        f"""
-        <div style="
-            border:1px dashed #94a3b8;
-            background:#f8fafc;
-            border-radius:16px;
-            padding:16px;
-            margin:10px 0;
-        ">
-            <div style="font-weight:900;color:#0f172a;font-size:1.05rem;">🔒 {title}</div>
-            <div style="color:#475569;margin-top:6px;">{teaser}</div>
-            <div style="color:#1e3a8a;font-weight:800;margin-top:8px;">Ez a PRO verzióban többhetes mentéssel és trenddel nyílik meg.</div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+def build_trend_insights(history_df: pd.DataFrame) -> List[Tuple[str, str]]:
+    """PRO V4: vezetői trendmegállapítások több időszak alapján."""
+    if history_df is None or history_df.empty or len(history_df) < 2:
+        return [("info", "Ments el legalább két időszakot, hogy trendmegállapítás készüljön.")]
+
+    h = history_df.sort_values("week").copy()
+    for col in ["oee", "selejt_pct", "allasido_perc", "javitasi_potencial_ft", "rendeles_teljesites_pct"]:
+        if col in h.columns:
+            h[col] = pd.to_numeric(h[col], errors="coerce")
+
+    first = h.iloc[0]
+    prev = h.iloc[-2]
+    last = h.iloc[-1]
+    notes = []
+
+    def delta(col):
+        if col not in h.columns or pd.isna(last.get(col)) or pd.isna(prev.get(col)):
+            return None
+        return float(last[col]) - float(prev[col])
+
+    d_oee = delta("oee")
+    if d_oee is not None:
+        notes.append(("success" if d_oee >= 0 else "warning", f"OEE előző időszakhoz képest: {d_oee:+.1f} pont."))
+
+    d_scrap = delta("selejt_pct")
+    if d_scrap is not None:
+        notes.append(("success" if d_scrap <= 0 else "danger", f"Selejt változás előző időszakhoz képest: {d_scrap:+.2f} százalékpont."))
+
+    d_down = delta("allasido_perc")
+    if d_down is not None:
+        notes.append(("success" if d_down <= 0 else "warning", f"Állásidő változás előző időszakhoz képest: {d_down:+.0f} perc."))
+
+    d_pot = delta("javitasi_potencial_ft")
+    if d_pot is not None:
+        notes.append(("success" if d_pot <= 0 else "warning", f"Javítási potenciál változás: {fmt_huf(d_pot)}. Ha nő, több pénz maradhat az asztalon."))
+
+    if "oee" in h.columns and h["oee"].notna().sum() >= 3:
+        last3 = h["oee"].dropna().tail(3).tolist()
+        if len(last3) == 3 and last3[0] > last3[1] > last3[2]:
+            notes.append(("danger", "Az OEE három egymást követő mentett időszakban romlott. Ez PRO szintű beavatkozási jel."))
+        elif len(last3) == 3 and last3[0] < last3[1] < last3[2]:
+            notes.append(("success", "Az OEE három egymást követő időszakban javult. Érdemes az aktuális működést standardizálni."))
+
+    return notes[:6]
 
 
+def build_prev_period_delta_table(history_df: pd.DataFrame) -> pd.DataFrame:
+    if history_df is None or history_df.empty or len(history_df) < 2:
+        return pd.DataFrame()
+    h = history_df.sort_values("week").copy()
+    metrics = [
+        ("OEE", "oee", "pont"),
+        ("Selejt %", "selejt_pct", "százalékpont"),
+        ("Állásidő", "allasido_perc", "perc"),
+        ("Rendelésteljesítés", "rendeles_teljesites_pct", "%"),
+        ("Javítási potenciál", "javitasi_potencial_ft", "Ft"),
+    ]
+    rows = []
+    prev = h.iloc[-2]
+    last = h.iloc[-1]
+    for label, col, unit in metrics:
+        if col not in h.columns:
+            continue
+        a = pd.to_numeric(pd.Series([prev.get(col)]), errors="coerce").iloc[0]
+        b = pd.to_numeric(pd.Series([last.get(col)]), errors="coerce").iloc[0]
+        if pd.isna(a) or pd.isna(b):
+            continue
+        diff = b - a
+        rows.append({
+            "Mutató": label,
+            "Előző": round(float(a), 2),
+            "Aktuális": round(float(b), 2),
+            "Változás": round(float(diff), 2),
+            "Egység": unit,
+        })
+    return pd.DataFrame(rows)
 
-def render_demo_paywall(title: str, bullets):
-    st.markdown(
-        f"""
-        <div style="border:1px solid #bfdbfe;background:linear-gradient(135deg,#eff6ff,#f8fafc);border-radius:18px;padding:18px;margin:12px 0;">
-            <div style="font-size:1.15rem;font-weight:950;color:#1e3a8a;">🔒 {title}</div>
-            <div style="margin-top:8px;color:#334155;">
-                {'<br>'.join(['• ' + str(b) for b in bullets])}
-            </div>
-            <div style="margin-top:10px;font-weight:900;color:#0f172a;">Ez a PRO verzióban nyílik meg mentett céges adatokkal.</div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
 
 def normalized_pair_score_table(pair_df: pd.DataFrame) -> pd.DataFrame:
     """Dolgozó-gép mátrix 0-100 normalizált pontszámmal.
@@ -773,7 +826,7 @@ def make_pdf_fulfillment_cards(summary_df: pd.DataFrame, width=500):
         return Paragraph("Nincs rendelésteljesítési adat.", ParagraphStyle("Empty", fontSize=8))
 
     rows = []
-    for _, r in summary_df.head(3).iterrows():
+    for _, r in summary_df.head(8).iterrows():
         pct = float(r.get("Teljesítés_%", 0) or 0)
         if pct >= 95:
             color, bg = "#16a34a", "#dcfce7"
@@ -801,7 +854,7 @@ def make_pdf_fulfillment_cards(summary_df: pd.DataFrame, width=500):
         ("TOPPADDING", (0,0), (-1,-1), 6),
         ("BOTTOMPADDING", (0,0), (-1,-1), 6),
     ]
-    for i, (_, r) in enumerate(summary_df.head(3).iterrows()):
+    for i, (_, r) in enumerate(summary_df.head(8).iterrows()):
         pct = float(r.get("Teljesítés_%", 0) or 0)
         bg = "#dcfce7" if pct >= 95 else "#fef3c7" if pct >= 75 else "#fee2e2"
         style.append(("BACKGROUND", (0,i), (-1,i), colors.HexColor(bg)))
@@ -944,7 +997,7 @@ def make_pdf_capacity_chart(capacity_df, width=500, height=165):
         d.add(String(0, height / 2, "Nincs kapacitásadat.", fontSize=8, fillColor=colors.HexColor("#64748b")))
         return d
 
-    data = capacity_df[["Gép", "Kihasználtság_%"]].copy().head(3)
+    data = capacity_df[["Gép", "Kihasználtság_%"]].copy().head(8)
     chart_top = height - 30
     row_h = min(18, (height - 42) / max(len(data), 1))
     label_w = 90
@@ -1025,7 +1078,7 @@ def compact_insight_table(recs, max_items=8):
 def make_pdf_impact_table(impact_df, width=500):
     if impact_df is None or impact_df.empty:
         return Paragraph("Nincs javítási potenciál adat.", ParagraphStyle("Empty", fontSize=8))
-    show = impact_df.head(3).copy()
+    show = impact_df.head(8).copy()
     show["Becsült_havi_hatás_Ft"] = show["Becsült_havi_hatás_Ft"].apply(fmt_huf)
     data = [["Terület", "Elem", "Probléma", "Becsült hatás", "Javaslat"]]
     for _, r in show.iterrows():
@@ -1056,7 +1109,7 @@ def make_pdf_impact_table(impact_df, width=500):
 def make_pdf_top_pairs_table(pair, width=500):
     if pair is None or pair.empty:
         return Paragraph("Nincs dolgozó-gép páros adat.", ParagraphStyle("Empty", fontSize=8))
-    top = pair.sort_values("Kompatibilitási_pont", ascending=False).head(3).copy()
+    top = pair.sort_values("Kompatibilitási_pont", ascending=False).head(8).copy()
     data = [["Páros", "Pont", "Teljesítmény", "Selejt"]]
     for _, r in top.iterrows():
         data.append([
@@ -1099,7 +1152,7 @@ def build_pdf_report(
     lost_revenue_df: pd.DataFrame = None,
     critical_orders_df: pd.DataFrame = None
 ) -> bytes:
-    """DEMO: rövidebb, informatívabb, kevésbé szöveges vezetői PDF."""
+    """PRO: rövidebb, informatívabb, kevésbé szöveges vezetői PDF."""
     if SimpleDocTemplate is None:
         return None
 
@@ -1126,7 +1179,7 @@ def build_pdf_report(
     fedezet_m = fedezet / 1_000_000
 
     story = []
-    story.append(Paragraph("Gyártási Diagnosztika DEMO V3.7 - vezetői riport", title_style))
+    story.append(Paragraph("Gyártási Diagnosztika PRO SaaS V4 V4.1 V2 SaaS.7 - vezetői riport", title_style))
     story.append(P("Rövid döntéstámogató riport: fő megállapítások, javítási potenciál, dolgozó-gép párosítások."))
     story.append(Spacer(1, 0.20 * cm))
 
@@ -1160,7 +1213,7 @@ def build_pdf_report(
 
     story.extend(pdf_section_header("Becsült javítási potenciál", "Top javítási lehetőségek havi becsült értékkel."))
     if impact_df is not None and not impact_df.empty:
-        story.append(make_pdf_bar_chart("Top potenciál", impact_df.head(3), "Elem", "Becsült_havi_hatás_Ft", " Ft", width=520, height=135, top_n=3))
+        story.append(make_pdf_bar_chart("Top potenciál", impact_df.head(5), "Elem", "Becsült_havi_hatás_Ft", " Ft", width=520, height=135, top_n=5))
         story.append(Spacer(1, 0.10 * cm))
     story.append(make_pdf_impact_table(impact_df, width=520))
     story.append(Spacer(1, 0.22 * cm))
@@ -1395,7 +1448,7 @@ def build_order_level_plan(
     hours_per_machine_day: float = 8.0,
     unavailable_machines: List[str] = None
 ) -> pd.DataFrame:
-    """DEMO.4.3.2: rendelésalapú gyártási terv.
+    """PRO.4.3.2: rendelésalapú gyártási terv.
 
     A Tervezett_db nem önálló becslés: az Igényelt_db-ből indul,
     majd a tervezési horizont, a gépórák, a gépenkénti kapacitás és a
@@ -1527,7 +1580,7 @@ def build_order_level_plan(
 
 
 def build_order_fulfillment_v7(plan_df: pd.DataFrame, orders_df: pd.DataFrame = None, manual_demand: Dict[str, int] = None) -> pd.DataFrame:
-    """Rendelés/igény teljesítés termékszinten, DEMO.4.3.2 logikával."""
+    """Rendelés/igény teljesítés termékszinten, PRO.4.3.2 logikával."""
     if plan_df is None or plan_df.empty:
         return pd.DataFrame()
 
@@ -1590,7 +1643,7 @@ def generate_plan_insights_v7(plan_df: pd.DataFrame, fulfillment_df: pd.DataFram
     active = plan_df[~plan_df["Gép"].isin(["Kapacitáshiány", "Nincs adat"])].copy()
     total_planned = active["Tervezett_db"].sum() if not active.empty else 0
     total_fedezet = active["Becsült_fedezet"].sum() if not active.empty else 0
-    recs.append(("success", f"A DEMO.4.3.2 terv {fmt_num(total_planned)} db gyártást és kb. {fmt_huf(total_fedezet)} becsült fedezetot mutat."))
+    recs.append(("success", f"A PRO.4.3.2 terv {fmt_num(total_planned)} db gyártást és kb. {fmt_huf(total_fedezet)} becsült fedezetot mutat."))
 
     if fulfillment_df is not None and not fulfillment_df.empty:
         shortage = fulfillment_df["Hiány_db"].sum()
@@ -1857,7 +1910,7 @@ def render_recommendations(recs: List[Tuple[str, str]]):
 
 
 def estimate_improvement_value(df: pd.DataFrame) -> pd.DataFrame:
-    """DEMO.4.3 költség/fedezet hatásbecslés.
+    """PRO.4.3 költség/fedezet hatásbecslés.
 
     Korábbi verzióban sokszor 0 Ft lett, mert Fedezet/db több helyzetben 0 vagy negatív.
     Itt inkább fedezeti értékkel számolunk:
@@ -1924,7 +1977,7 @@ def estimate_improvement_value(df: pd.DataFrame) -> pd.DataFrame:
     if not pair.empty:
         pair["Selejt_%"] = np.where(pair["Gyártott_db"] > 0, pair["Selejt_db"] / pair["Gyártott_db"] * 100, 0)
         avg_scrap_rate = pair["Selejt_db"].sum() / max(pair["Gyártott_db"].sum(), 1)
-        bad_pairs = pair[pair["Selejt_%"] > avg_scrap_rate * 100 * 1.15].sort_values("Selejt_%", ascending=False).head(3)
+        bad_pairs = pair[pair["Selejt_%"] > avg_scrap_rate * 100 * 1.15].sort_values("Selejt_%", ascending=False).head(8)
 
         for _, r in bad_pairs.iterrows():
             margin = max(float(r["Fedezet_db"]), avg_margin, 1)
@@ -1956,7 +2009,7 @@ def estimate_improvement_value(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def generate_root_cause_insights(df: pd.DataFrame, pair: pd.DataFrame, impact_df: pd.DataFrame) -> List[Tuple[str, str]]:
-    """DEMO.4.3.2 szabályalapú, AI-szerű gyökérokelemzés."""
+    """PRO.4.3.2 szabályalapú, AI-szerű gyökérokelemzés."""
     recs = []
     if df is None or df.empty:
         return recs
@@ -1991,7 +2044,7 @@ def generate_root_cause_insights(df: pd.DataFrame, pair: pd.DataFrame, impact_df
 
 
 # ------------------------------------------------------------
-# DEMO.4.3.2 Excel Mapper / standardizáló réteg
+# PRO.4.3.2 Excel Mapper / standardizáló réteg
 # ------------------------------------------------------------
 STANDARD_SHEET_HINTS = {
     "production": ["termeles", "termelés", "production", "gyartas", "gyártás", "data", "adat", "riport"],
@@ -2075,7 +2128,7 @@ def standardize_with_mapping(df: pd.DataFrame, mapping: Dict[str, str], required
     return out
 
 def render_mapper_ui(sheets: Dict[str, pd.DataFrame]):
-    """DEMO.4.3.2 mapper UI: eltérő szerkezetű Excel is feldolgozható."""
+    """PRO.4.3.2 mapper UI: eltérő szerkezetű Excel is feldolgozható."""
     with st.expander("Excel Mapper / oszlop-standardizálás", expanded=False):
         st.caption("Ha a céges Excel oszlopnevei eltérnek, itt megadható, melyik oszlop mit jelent. Az app ezután standard belső formára alakítja.")
 
@@ -2148,11 +2201,344 @@ def render_mapper_ui(sheets: Dict[str, pd.DataFrame]):
         return prod_std, machines_std, products_std, orders_std
 
 
+
+# ------------------------------------------------------------
+# PRO jelszóvédelem + egyszerű fájlalapú mentés
+# ------------------------------------------------------------
+def check_password():
+    expected = None
+    try:
+        expected = st.secrets.get("APP_PASSWORD", None)
+    except Exception:
+        expected = None
+    if not expected:
+        expected = os.environ.get("APP_PASSWORD", "demo-pro-123")
+
+    if "password_ok" not in st.session_state:
+        st.session_state.password_ok = False
+
+    if st.session_state.password_ok:
+        return True
+
+    st.markdown("## 🔐 Gyártási Diagnosztika PRO SaaS V4 V4.1 V2 SaaS")
+    st.caption("Tesztjelszó alapértelmezetten: demo-pro-123. Élesben Streamlit Secrets: APP_PASSWORD.")
+    pw = st.text_input("Jelszó", type="password")
+    if st.button("Belépés"):
+        if pw == expected:
+            st.session_state.password_ok = True
+            st.rerun()
+        else:
+            st.error("Hibás jelszó.")
+    return False
+
+if not check_password():
+    st.stop()
+
+def get_supabase_client():
+    """Auth kliens: belépéshez anon/publishable kulcsot használ."""
+    if create_client is None:
+        return None
+    try:
+        url = st.secrets.get("SUPABASE_URL", None)
+        key = st.secrets.get("SUPABASE_ANON_KEY", None) or st.secrets.get("SUPABASE_PUBLISHABLE_KEY", None)
+    except Exception:
+        url = None
+        key = None
+
+    url = url or os.environ.get("SUPABASE_URL")
+    key = key or os.environ.get("SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_PUBLISHABLE_KEY")
+    if not url or not key:
+        return None
+
+    url = str(url).replace("/rest/v1/", "").rstrip("/")
+    return create_client(url, key)
+
+
+def get_supabase_data_client():
+    """Adatbázis kliens szerveroldali műveletekhez.
+
+    Ha van SUPABASE_SERVICE_ROLE_KEY a Streamlit Secrets-ben, azt használja.
+    Ez stabilabb SaaS oldali lekérdezéshez/mentéshez, mert nem akad el RLS/policy miatt.
+    """
+    if create_client is None:
+        return None
+    try:
+        url = st.secrets.get("SUPABASE_URL", None)
+        service_key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", None)
+        anon_key = st.secrets.get("SUPABASE_ANON_KEY", None) or st.secrets.get("SUPABASE_PUBLISHABLE_KEY", None)
+    except Exception:
+        url = None
+        service_key = None
+        anon_key = None
+
+    url = url or os.environ.get("SUPABASE_URL")
+    key = service_key or os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or anon_key or os.environ.get("SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_PUBLISHABLE_KEY")
+    if not url or not key:
+        return None
+
+    url = str(url).replace("/rest/v1/", "").rstrip("/")
+    return create_client(url, key)
+
+def save_week_snapshot(company, week_label, kpis, uploaded_name=""):
+    """PRO V4: Supabase mentés service role data clienttel, ha elérhető."""
+    if st.session_state.get("readonly_mode"):
+        raise RuntimeError("Az előfizetés lejárt vagy inaktív. Új mentés nem engedélyezett.")
+
+    client = get_supabase_data_client()
+    if client is None:
+        raise RuntimeError("Supabase nincs beállítva.")
+
+    ctx = st.session_state.get("company_context", {})
+    user = st.session_state.get("pro_user", {})
+
+    allowed = {
+        "gyartott_db", "selejt_pct", "oee", "allasido_perc", "becsult_fedezet",
+        "rendeles_teljesites_pct", "max_kapacitas_pct", "egeszsegpont", "javitasi_potencial_ft"
+    }
+
+    clean_kpis = {}
+    for k, v in (kpis or {}).items():
+        if k not in allowed:
+            continue
+        try:
+            clean_kpis[k] = None if pd.isna(v) else float(v)
+        except Exception:
+            clean_kpis[k] = None
+
+    payload = {
+        "company_id": ctx.get("company_id"),
+        "company": ctx.get("company_name") or company,
+        "user_id": user.get("id"),
+        "week": str(week_label),
+        "uploaded_name": uploaded_name or "",
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+        **clean_kpis,
+    }
+
+    try:
+        return (
+            client
+            .table("production_snapshots")
+            .upsert(payload, on_conflict="company_id,week")
+            .execute()
+        )
+    except Exception as exc:
+        st.error("Supabase mentési hiba.")
+        st.code(str(exc))
+        st.info("Ellenőrizd: production_snapshots tábla, company_id+week unique index, valamint SUPABASE_SERVICE_ROLE_KEY a Secrets-ben.")
+        raise
+
+def load_company_history(company=None):
+    """Korábbi hetek betöltése Supabase-ből a belépett user cégére szűrve."""
+    client = get_supabase_data_client()
+    if client is None:
+        return pd.DataFrame()
+
+    ctx = st.session_state.get("company_context", {})
+    company_id = ctx.get("company_id")
+    if not company_id:
+        return pd.DataFrame()
+
+    try:
+        res = (
+            client
+            .table("production_snapshots")
+            .select("*")
+            .eq("company_id", company_id)
+            .order("week")
+            .execute()
+        )
+        return pd.DataFrame(res.data or [])
+    except Exception as exc:
+        st.warning(f"Előzmények betöltése sikertelen: {exc}")
+        return pd.DataFrame()
+
+def build_pro_kpi_snapshot(filtered, default_fulfillment_df=None, default_capacity_df=None, advisor_scores=None):
+    total_qty = float(filtered["Gyártott_db"].sum()) if filtered is not None and not filtered.empty else 0
+    scrap_pct = float(filtered["Selejt_db"].sum() / total_qty * 100) if total_qty else 0
+    avg_oee = float(filtered["OEE_light_%"].mean()) if filtered is not None and not filtered.empty and "OEE_light_%" in filtered.columns else 0
+    downtime = float(filtered["Állásidő_perc"].sum()) if filtered is not None and not filtered.empty and "Állásidő_perc" in filtered.columns else 0
+    fed = float(filtered["Becsült_profit"].sum()) if filtered is not None and not filtered.empty and "Becsült_profit" in filtered.columns else 0
+    fulfillment = None
+    if default_fulfillment_df is not None and not default_fulfillment_df.empty and "Teljesítés_%" in default_fulfillment_df.columns:
+        fulfillment = float(default_fulfillment_df["Teljesítés_%"].mean())
+    max_capacity = None
+    if default_capacity_df is not None and not default_capacity_df.empty and "Kihasználtság_%" in default_capacity_df.columns:
+        max_capacity = float(default_capacity_df["Kihasználtság_%"].max())
+    return {
+        "gyartott_db": total_qty,
+        "selejt_pct": scrap_pct,
+        "oee": avg_oee,
+        "allasido_perc": downtime,
+        "becsult_fedezet": fed,
+        "rendeles_teljesites_pct": fulfillment,
+        "max_kapacitas_pct": max_capacity,
+        "egeszsegpont": (advisor_scores or {}).get("Egészségpont", None),
+        "javitasi_potencial_ft": (advisor_scores or {}).get("Profitveszteség_Ft", None),
+    }
+
+
+# ------------------------------------------------------------
+# PRO SaaS: Supabase Auth + cég + előfizetés
+# ------------------------------------------------------------
+def restore_auth_session(sb):
+    if st.session_state.get("access_token") and st.session_state.get("refresh_token"):
+        try:
+            sb.auth.set_session(st.session_state["access_token"], st.session_state["refresh_token"])
+        except Exception:
+            pass
+
+
+def logout_pro():
+    for k in ["pro_user", "access_token", "refresh_token", "company_context", "readonly_mode"]:
+        st.session_state.pop(k, None)
+    st.rerun()
+
+
+def login_required_pro():
+    sb = get_supabase_client()
+    if sb is None:
+        st.error("Supabase nincs beállítva. Add meg a SUPABASE_URL és SUPABASE_ANON_KEY értékeket a Streamlit Secrets-ben.")
+        st.stop()
+
+    restore_auth_session(sb)
+
+    if st.session_state.get("pro_user"):
+        return sb, st.session_state["pro_user"]
+
+    st.markdown("## 🔐 Gyártási Diagnosztika PRO SaaS V4 V4.1 V2 SaaS")
+    st.caption("Előfizetőknek: belépés email + jelszóval. Fiókot az admin hoz létre az ügyfélnek.")
+    email = st.text_input("Email", key="pro_login_email")
+    password = st.text_input("Jelszó", type="password", key="pro_login_password")
+
+    if st.button("Belépés", use_container_width=True):
+        try:
+            res = sb.auth.sign_in_with_password({"email": email, "password": password})
+            st.session_state["pro_user"] = {"id": res.user.id, "email": res.user.email}
+            st.session_state["access_token"] = res.session.access_token
+            st.session_state["refresh_token"] = res.session.refresh_token
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Belépés sikertelen: {exc}")
+
+    st.info("Nincs fiókod? Kérj PRO hozzáférést az üzemeltetőtől.")
+    st.stop()
+
+
+def load_company_context(sb, user_id: str):
+    """Céges jogosultság betöltése stabil, kétlépcsős módon.
+
+    V4:
+    - company_users táblát service role data clienttel kérdezi, ha elérhető
+    - utána külön tölti be a companies sort
+    - ha nincs sor, kiírja az ellenőrző SQL-t
+    """
+    data_sb = get_supabase_data_client() or sb
+
+    try:
+        membership_res = (
+            data_sb.table("company_users")
+            .select("*")
+            .eq("user_id", str(user_id))
+            .execute()
+        )
+        rows = membership_res.data or []
+    except Exception as exc:
+        st.error(f"Céges jogosultság betöltése sikertelen: {exc}")
+        st.code(f"Belépett user_id: {user_id}")
+        st.stop()
+
+    if not rows:
+        st.error("Ehhez a felhasználóhoz nincs cég jogosultság rendelve.")
+        st.code(f"Belépett user_id: {user_id}")
+        st.info(
+            "Ha a Supabase-ben látod ezt a user_id-t a company_users táblában, "
+            "akkor add meg a SUPABASE_SERVICE_ROLE_KEY értéket is a Streamlit Secrets-ben."
+        )
+        st.code(f"""select * 
+from company_users 
+where user_id = '{user_id}';""")
+        st.stop()
+
+    row = rows[0]
+    company_id = row.get("company_id")
+
+    try:
+        company_res = (
+            data_sb.table("companies")
+            .select("*")
+            .eq("id", company_id)
+            .single()
+            .execute()
+        )
+        company = company_res.data or {}
+    except Exception as exc:
+        st.error(f"Cégadat betöltése sikertelen: {exc}")
+        st.code(f"company_id: {company_id}")
+        st.stop()
+
+    return {
+        "company_id": company.get("id") or company_id,
+        "company_name": company.get("company_name", "Ismeretlen cég"),
+        "plan": company.get("plan", "PRO"),
+        "valid_until": company.get("valid_until"),
+        "status": company.get("status", "active"),
+        "role": row.get("role", "user"),
+    }
+
+def subscription_state(ctx):
+    status = str(ctx.get("status", "active")).lower()
+    valid_until_raw = ctx.get("valid_until")
+
+    if status not in ["active", "trial"]:
+        return True, f"Az előfizetés állapota: {status}. Csak megtekintés engedélyezett."
+
+    if not valid_until_raw:
+        return False, "Nincs lejárati dátum beállítva."
+
+    try:
+        valid_until = dt_date.fromisoformat(str(valid_until_raw)[:10])
+        today = dt_date.today()
+        if valid_until < today:
+            return True, f"Az előfizetés lejárt: {valid_until}. A korábbi adatok megtekinthetők, új mentés nem engedélyezett."
+        return False, f"Előfizetés érvényes: {valid_until} ({(valid_until - today).days} nap van hátra)."
+    except Exception:
+        return False, f"Előfizetés érvényes dátumként nem értelmezhető: {valid_until_raw}"
+
+
+def load_company_history(company=None):
+    client = get_supabase_client()
+    if client is None:
+        return pd.DataFrame()
+
+    ctx = st.session_state.get("company_context", {})
+    company_id = ctx.get("company_id")
+    if not company_id:
+        return pd.DataFrame()
+
+    res = (
+        client
+        .table("production_snapshots")
+        .select("*")
+        .eq("company_id", company_id)
+        .order("week")
+        .execute()
+    )
+    return pd.DataFrame(res.data or [])
+
+
+sb, pro_user = login_required_pro()
+company_context = load_company_context(sb, pro_user["id"])
+readonly_mode, subscription_message = subscription_state(company_context)
+st.session_state["company_context"] = company_context
+st.session_state["readonly_mode"] = readonly_mode
+
+
 # ------------------------------------------------------------
 # Header
 # ------------------------------------------------------------
-st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika DEMO V3</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">Ingyenes, egyszeri Excel-alapú gyártási diagnózis. Nem ment adatot, nem készít többhetes trendet.</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🏭 Gyártási Diagnosztika PRO SaaS V4 V4.1 V2 SaaS</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">PRO SaaS verzió: emailes belépés, céges jogosultság, előfizetés-kezelés, tartós többhetes trendek és read-only mód lejárat után.</div>', unsafe_allow_html=True)
 
 
 # ------------------------------------------------------------
@@ -2172,13 +2558,17 @@ if uploaded is None:
     st.stop()
 
 
+
+if readonly_mode:
+    st.warning("READ-ONLY mód: az előfizetés lejárt vagy inaktív. A korábbi adatok megtekinthetők, de új mentés nem engedélyezett.")
+
 # ------------------------------------------------------------
 # Adatbetöltés
 # ------------------------------------------------------------
 try:
     sheets = safe_read_excel(uploaded)
 
-    # DEMO.4.3.2: Excel Mapper - eltérő nevű oszlopok/munkalapok esetén is standardizál
+    # PRO.4.3.2: Excel Mapper - eltérő nevű oszlopok/munkalapok esetén is standardizál
     prod_raw, machines_raw, products_raw, orders_raw = render_mapper_ui(sheets)
 
     validate_columns(prod_raw, REQUIRED_PROD_COLS, "Termeles")
@@ -2193,11 +2583,41 @@ except Exception as exc:
 
 
 
-st.info(
-    "DEMO mód: egyszeri elemzés egy Excel alapján. "
-    "A PRO verzióban elérhető: többhetes trendek, mentett riportok, automatikus heti összehasonlítás, "
-    "részletes akcióterv, kapacitás- és rendelés-tervezés, what-if szimuláció."
-)
+
+with st.sidebar:
+    st.markdown("---")
+    st.subheader("PRO előfizetés")
+    st.write(f"Belépve: **{pro_user.get('email','')}**")
+    st.write(f"Cég: **{company_context.get('company_name','')}**")
+    st.write(f"Csomag: **{company_context.get('plan','PRO')}**")
+
+    with st.expander("Technikai ellenőrzés"):
+        st.code(f"user_id = {pro_user.get('id','')}")
+        st.code(f"company_id = {company_context.get('company_id','')}")
+        try:
+            service_present = bool(st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", None))
+        except Exception:
+            service_present = bool(os.environ.get("SUPABASE_SERVICE_ROLE_KEY"))
+        st.code(f"Service role key: {'BEÁLLÍTVA' if service_present else 'NINCS BEÁLLÍTVA'}")
+
+    if readonly_mode:
+        st.error(subscription_message)
+    else:
+        st.success(subscription_message)
+    if st.button("Kijelentkezés", use_container_width=True):
+        logout_pro()
+
+    st.markdown("---")
+    st.subheader("PRO mentés")
+    company_name = company_context.get("company_name", "Cég")
+    week_label = st.text_input("Időszak címkéje", value=datetime.now().strftime("%Y-W%U"))
+
+
+with st.sidebar:
+    if get_supabase_client() is None:
+        st.error("Supabase nincs beállítva. Add meg a SUPABASE_URL és SUPABASE_ANON_KEY értékeket a Secrets-ben.")
+    else:
+        st.success("Supabase kapcsolat aktív.")
 
 # ------------------------------------------------------------
 # Globális szűrők
@@ -2257,19 +2677,19 @@ default_fulfillment_df = build_order_fulfillment(default_plan_df, orders_df) if 
 
 
 
-# DEMO.4.3.2: költséghatás és gyökérokelemzés
+# PRO.4.3.2: költséghatás és gyökérokelemzés
 impact_df = estimate_improvement_value(filtered)
 root_cause_recs = generate_root_cause_insights(filtered, pair, impact_df)
 
 
-# DEMO.4.3.2: Digital Production Advisor mutatók
+# PRO.4.3.2: Digital Production Advisor mutatók
 advisor_scores = calculate_advisor_scores(default_plan_df if 'default_plan_df' in globals() and not default_plan_df.empty else filtered, default_fulfillment_df, default_capacity_df, impact_df)
 action_plan_df = build_action_plan(filtered, pair, impact_df, default_capacity_df, default_fulfillment_df)
 pair_score_matrix = normalized_pair_score_table(pair)
 symbol_matrix = make_symbol_heatmap_from_matrix(pair_score_matrix)
 
 
-# DEMO: ok-okozati lánc és rendelés/hiány pénzügyi összekötés
+# PRO: ok-okozati lánc és rendelés/hiány pénzügyi összekötés
 default_fulfillment_summary = summarize_plan_by_product(default_plan_df, default_fulfillment_df) if "default_plan_df" in globals() else pd.DataFrame()
 lost_revenue_df = estimate_lost_revenue_by_product(default_fulfillment_summary, df=filtered)
 causal_chain_df = build_causal_chain(default_plan_df, default_fulfillment_df, pair, default_capacity_df, filtered) if "default_plan_df" in globals() else pd.DataFrame()
@@ -2287,8 +2707,9 @@ tabs = st.tabs([
     "6. Ajánlórendszer",
     "7. Gyártási terv + beosztás",
     "8. Digital Advisor",
-    "9. Megrendelések",
-    "10. Adatellenőrzés"
+    "9. PRO trendek",
+    "10. Megrendelések",
+    "11. Adatellenőrzés"
 ])
 
 
@@ -2310,20 +2731,6 @@ with tabs[0]:
     with k5:
         show_kpi("Becsült fedezet", fmt_huf(fedezet), "Árbevétel - anyag - gépköltség")
 
-
-    st.markdown("### DEMO korlátozás")
-    st.info("A DEMO csak gyors, egyszeri diagnózis: nincs mentés, nincs trend, nincs teljes akcióterv. A cél az érdeklődés felkeltése.")
-    render_demo_paywall(
-        "Mit látna a PRO-ban?",
-        [
-            "Több hét összehasonlítása: javul vagy romlik a gép, műszak, dolgozó?",
-            "Teljes top lista és részletes akcióterv, nem csak rövidített top 3.",
-            "Mentett céges riportok és automatikus előző időszakhoz viszonyítás.",
-            "Romló gépek, javuló dolgozók, növekvő selejt vagy állásidő automatikus felismerése.",
-            "What-if és kapacitás döntéstámogatás."
-        ]
-    )
-
     st.markdown("### Automatikus vezetői megállapítások")
     render_recommendations(recs + root_cause_recs + (default_plan_recs if 'default_plan_recs' in globals() else []))
 
@@ -2331,7 +2738,7 @@ with tabs[0]:
     if impact_df.empty:
         st.info("Nincs elég adat költséghatás-becsléshez.")
     else:
-        st.dataframe(impact_df.head(3), use_container_width=True, hide_index=True)
+        st.dataframe(impact_df.head(8), use_container_width=True, hide_index=True)
 
     st.markdown("### Digital Advisor összefoglaló")
     c1, c2, c3, c4 = st.columns(4)
@@ -2348,7 +2755,7 @@ with tabs[0]:
     if action_plan_df.empty:
         st.info("Nincs elég adat akciólista készítéséhez.")
     else:
-        st.dataframe(action_plan_df.head(3), use_container_width=True, hide_index=True)
+        st.dataframe(action_plan_df.head(5), use_container_width=True, hide_index=True)
 
     st.markdown("### Termék → gép → dolgozó ok-okozati lánc")
     if causal_chain_df.empty:
@@ -2544,9 +2951,8 @@ with tabs[5]:
 # 7. Gyártási terv + beosztás
 # ------------------------------------------------------------
 with tabs[6]:
-    render_demo_paywall("Gyártási terv + beosztás csak PRO-ban", ["Rendelésállományból terv", "Dolgozó-gép ajánlott beosztás", "Kapacitáshiány kezelése"])
     st.subheader("Gyártási terv szimulátor + dolgozói beosztás")
-    st.caption("DEMO.4.3.2: a tervezett db rendelésállományból, tervezési horizontból, gépórából és múltbeli termék-gép teljesítményből számolódik.")
+    st.caption("PRO.4.3.2: a tervezett db rendelésállományból, tervezési horizontból, gépórából és múltbeli termék-gép teljesítményből számolódik.")
 
     if orders_df is not None and not orders_df.empty:
         st.success("Megrendelések munkalap felismerve: a tervezés rendelésállományból indul.")
@@ -2668,7 +3074,7 @@ with tabs[6]:
     st.markdown("### 5. Export")
     excel_bytes = build_excel_report(filtered, pair, assignment, plan_df, worker_plan, orders_df, fulfillment_df, capacity_df, impact_df)
     st.download_button(
-        "⬇️ DEMO.4.3.2 Excel riport letöltése",
+        "⬇️ PRO.4.3.2 Excel riport letöltése",
         data=excel_bytes,
         file_name="gyartasi_diagnosztika_v10_riport.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2686,9 +3092,8 @@ with tabs[6]:
 # 8. Digital Advisor / What-if
 # ------------------------------------------------------------
 with tabs[7]:
-    render_demo_paywall("Digital Advisor csak PRO-ban", ["What-if szimulátor", "Részletes akciólista", "Mentett céges benchmarkok"])
     st.subheader("Digital Production Advisor")
-    st.caption("DEMO.4.3.2: vezetői egészségpont, akciólista, dolgozó-gép hőtérkép és mi történik ha szimuláció.")
+    st.caption("PRO.4.3.2: vezetői egészségpont, akciólista, dolgozó-gép hőtérkép és mi történik ha szimuláció.")
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -2732,10 +3137,84 @@ with tabs[7]:
     st.plotly_chart(fig, use_container_width=True)
 
 
+
+# ------------------------------------------------------------
+# 9. PRO trendek
+# ------------------------------------------------------------
+with tabs[8]:
+    st.subheader("PRO V4 trendmotor és mentett riportok")
+    st.caption("A DEMO egyszeri képet ad. A PRO V4 több időszak alapján mutatja: javulás, romlás, trend, előző időszakhoz képesti eltérés.")
+
+    current_snapshot = build_pro_kpi_snapshot(
+        filtered,
+        default_fulfillment_df if "default_fulfillment_df" in globals() else pd.DataFrame(),
+        default_capacity_df if "default_capacity_df" in globals() else pd.DataFrame(),
+        advisor_scores if "advisor_scores" in globals() else {}
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Aktuális időszak mentése PRO trendhez", use_container_width=True, disabled=readonly_mode):
+            path = save_week_snapshot(company_name, week_label, current_snapshot, uploaded.name if uploaded else "")
+            st.success("Mentve Supabase-be.")
+    with c2:
+        st.info("Supabase mentés: az előzmények tartósan megmaradnak, és több hét/hónap trendjei összevethetők.")
+
+    hist = load_company_history(company_name)
+    if hist.empty:
+        st.warning("Még nincs mentett előzmény. Ments el legalább két időszakot trendhez.")
+    else:
+        hist = hist.sort_values("week")
+        st.markdown("### Mentett időszakok")
+        st.dataframe(hist, use_container_width=True, hide_index=True)
+
+        for col in ["gyartott_db", "selejt_pct", "oee", "allasido_perc", "rendeles_teljesites_pct", "max_kapacitas_pct", "egeszsegpont", "javitasi_potencial_ft"]:
+            if col in hist.columns:
+                hist[col] = pd.to_numeric(hist[col], errors="coerce")
+
+
+        st.markdown("### Előző időszakhoz képesti változás")
+        delta_df = build_prev_period_delta_table(hist)
+        if delta_df.empty:
+            st.info("Legalább két mentett időszak kell az összehasonlításhoz.")
+        else:
+            st.dataframe(delta_df, use_container_width=True, hide_index=True)
+
+        st.markdown("### PRO V4 automatikus trendértékelés")
+        render_recommendations(build_trend_insights(hist))
+
+        st.markdown("### Trenddiagramok")
+        if "oee" in hist.columns:
+            st.plotly_chart(px.line(hist, x="week", y="oee", markers=True, title="OEE trend"), use_container_width=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if "selejt_pct" in hist.columns:
+                st.plotly_chart(px.line(hist, x="week", y="selejt_pct", markers=True, title="Selejt % trend"), use_container_width=True)
+        with c2:
+            if "javitasi_potencial_ft" in hist.columns:
+                st.plotly_chart(px.line(hist, x="week", y="javitasi_potencial_ft", markers=True, title="Javítási potenciál trend"), use_container_width=True)
+
+        st.markdown("### Automatikus trendmegállapítás")
+        if len(hist) >= 2:
+            first, last = hist.iloc[0], hist.iloc[-1]
+            notes = []
+            if pd.notna(first.get("oee")) and pd.notna(last.get("oee")):
+                diff = last["oee"] - first["oee"]
+                notes.append(("success" if diff >= 0 else "warning", f"OEE változás: {diff:.1f} pont."))
+            if pd.notna(first.get("selejt_pct")) and pd.notna(last.get("selejt_pct")):
+                diff = last["selejt_pct"] - first["selejt_pct"]
+                notes.append(("success" if diff <= 0 else "danger", f"Selejt változás: {diff:.2f} százalékpont."))
+            if pd.notna(first.get("javitasi_potencial_ft")) and pd.notna(last.get("javitasi_potencial_ft")):
+                diff = last["javitasi_potencial_ft"] - first["javitasi_potencial_ft"]
+                notes.append(("success" if diff <= 0 else "warning", f"Javítási potenciál változás: {fmt_huf(diff)}."))
+            render_recommendations(notes)
+
+
 # ------------------------------------------------------------
 # 8. Megrendelések
 # ------------------------------------------------------------
-with tabs[8]:
+with tabs[9]:
     st.subheader("Megrendelésállomány")
     st.caption("Opcionális munkalap: Megrendelesek. Ha feltöltöd, a gyártási terv automatikusan ebből indul.")
 
@@ -2763,7 +3242,7 @@ with tabs[8]:
 # ------------------------------------------------------------
 # 7. Adatellenőrzés
 # ------------------------------------------------------------
-with tabs[9]:
+with tabs[10]:
     st.subheader("Adatellenőrzés")
     st.markdown("### Feldolgozott adatok")
     st.dataframe(filtered.head(500), use_container_width=True, hide_index=True)
